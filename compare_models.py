@@ -76,7 +76,8 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt'):
         ckpt_name="clear_d2n_baseline",
         norm="instance",
         no_dropout=True,
-        netG="resnet_9blocks"
+        netG="resnet_9blocks",
+        use_crop=False  # scale_width 사용 (YOLO 평가에 유리)
     )
     
     print("✓ Baseline 변환 완료\n")
@@ -89,10 +90,11 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt'):
     run_cyclegan_b2a(
         input_dir=night_input / "images",
         results_root=yolo_out,
-        ckpt_name="clear_d2n_yolo_v3_lambda2",
+        ckpt_name="clear_d2n_yolo_v3_lambda3_scalewidth",
         norm="instance",
         no_dropout=True,
-        netG="resnet_9blocks"
+        netG="resnet_9blocks",
+        use_crop=False  # scale_width 사용 (YOLO 평가에 유리)
     )
     
     print("✓ YOLO 모델 변환 완료\n")
@@ -111,7 +113,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt'):
     # YOLO 모델
     yolo_yolo = exp_root / "yolo_eval" / "yolo"
     prepare_for_yolo_val(
-        img_dir=yolo_out / "clear_d2n_yolo_v3_lambda2" / "test_latest" / "images",
+        img_dir=yolo_out / "clear_d2n_yolo_v3_lambda3_scalewidth" / "test_latest" / "images",
         label_dir=night_input / "labels",
         output_dir=yolo_yolo
     )
