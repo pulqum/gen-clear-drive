@@ -224,12 +224,15 @@ def is_night(img_bgr: np.ndarray, v_thresh=55.0, dark_ratio_thresh=0.35):
 # ---------- CycleGAN B->A ----------
 def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
                      norm="instance", no_dropout=True, netG="resnet_9blocks",
-                     load_size=286, crop_size=256, use_crop=False):
+                     load_size=286, crop_size=256, use_crop=False, epoch="latest"):
     """Use TestModel + --model_suffix _B (G_B: B->A). Save into results_root/<ckpt>/test_latest/images
     
     CRITICAL: use_crop should match training preprocess!
     - use_crop=True: resize to load_size, then center crop to crop_size (matches training with --preprocess resize_and_crop)
     - use_crop=False: scale to nearest power of 4 (use if trained with --preprocess none or scale_width)
+    
+    Args:
+        epoch: Which checkpoint epoch to load (e.g., "50", "100", "latest")
     """
     # Clean previous results to avoid mixing *_real and old outputs
     out_root = results_root / ckpt_name
@@ -239,7 +242,7 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
         sys.executable, str(CYCLEGAN_REPO / "test.py"),
         "--dataroot", str(input_dir),
         "--name", ckpt_name,
-        "--model", "test", "--model_suffix", "_B", "--epoch", "latest",
+        "--model", "test", "--model_suffix", "_B", "--epoch", str(epoch),
         "--netG", netG, "--norm", norm,
         "--no_flip",
         "--results_dir", str(results_root)
@@ -256,8 +259,56 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
         cmd += ["--preprocess", "scale_width", "--load_size", str(crop_size), "--crop_size", str(crop_size)]
     
     print("[CycleGAN] ", " ".join(cmd))
-    subprocess.run(cmd, check=True, cwd=CYCLEGAN_REPO)
-    out = results_root / ckpt_name / "test_latest" / "images"
+    result = subprocess.run(cmd, cwd=CYCLEGAN_REPO, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("❌ CycleGAN test.py 실행 실패!")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        raise RuntimeError(f"CycleGAN test failed with exit code {result.returncode}")
+    
+    # 에폭 지정 시 test_<epoch> 폴더 생성됨
+    test_folder = "test_latest" if epoch == "latest" else f"test_{epoch}"
+    out = results_root / ckpt_name / test_folder / "images"
+    if not out.exists():
+        raise RuntimeError(f"CycleGAN results not found: {out}")
+    return out
+
+def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
+                     norm="instance", no_dropout=True, netG="resnet_9blocks",
+                     load_size=286, crop_size=256, use_crop=False, epoch="latest"):
+    """Use TestModel + --model_suffix _A (G_A: A->B). Save into results_root/<ckpt>/test_latest/images"""
+    # Clean previous results to avoid mixing *_real and old outputs
+    out_root = results_root / ckpt_name
+    if out_root.exists():
+        shutil.rmtree(out_root)
+    cmd = [
+        sys.executable, str(CYCLEGAN_REPO / "test.py"),
+        "--dataroot", str(input_dir),
+        "--name", ckpt_name,
+        "--model", "test", "--model_suffix", "_A", "--epoch", str(epoch),
+        "--netG", netG, "--norm", norm,
+        "--no_flip",
+        "--results_dir", str(results_root)
+    ]
+    if no_dropout:
+        cmd.append("--no_dropout")
+    
+    # CRITICAL FIX: Match training preprocessing!
+    if use_crop:
+        cmd += ["--preprocess", "resize_and_crop", "--load_size", str(load_size), "--crop_size", str(crop_size)]
+    else:
+        cmd += ["--preprocess", "scale_width", "--load_size", str(crop_size), "--crop_size", str(crop_size)]
+    
+    print("[CycleGAN A->B] ", " ".join(cmd))
+    result = subprocess.run(cmd, cwd=CYCLEGAN_REPO, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("❌ CycleGAN test.py 실행 실패!")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        raise RuntimeError(f"CycleGAN test failed with exit code {result.returncode}")
+    
+    test_folder = "test_latest" if epoch == "latest" else f"test_{epoch}"
+    out = results_root / ckpt_name / test_folder / "images"
     if not out.exists():
         raise RuntimeError(f"CycleGAN results not found: {out}")
     return out
@@ -320,7 +371,7 @@ def collect_fake_only_and_rename(cg_out_dir: Path, dst_dir: Path, original_img_d
     return n
 
 # ---------- YOLO ----------
-def run_yolo_val_api(model_path: Path, data_yaml: Path, split="test", imgsz=1280, device="0", save_dir: Path=None):
+def run_yolo_val_api(model_path: Path, data_yaml: Path, split="test", imgsz=1280, device="0", save_dir: Path=None, save_txt=False, save_conf=False):
     from ultralytics import YOLO
     save_dir = save_dir or Path.cwd() / "yolo_api_out"
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -335,6 +386,8 @@ def run_yolo_val_api(model_path: Path, data_yaml: Path, split="test", imgsz=1280
         name=".",
         exist_ok=True,
         verbose=False,
+        save_txt=save_txt,
+        save_conf=save_conf,
     )
     # metrics.box: Namespace(map50_95, map50, mp, mr, ...)
     return {
@@ -342,7 +395,9 @@ def run_yolo_val_api(model_path: Path, data_yaml: Path, split="test", imgsz=1280
         "mAP50": float(metrics.box.map50) if hasattr(metrics, "box") else None,
         "precision": float(metrics.box.mp) if hasattr(metrics, "box") else None,
         "recall": float(metrics.box.mr) if hasattr(metrics, "box") else None,
+        "save_dir": save_dir  # Return save_dir to locate txt files
     }
+
 
 def run_yolo_val(model_path: Path, data_yaml: Path, split="test", imgsz=1280, device="0", save_dir: Path=None):
     base = ["yolo"] if shutil.which("yolo") else [sys.executable, "-m", "ultralytics"]
