@@ -1,8 +1,10 @@
 # run.py
 # Project root: C:\Users\korea\Documents\GitHub\gen-clear-drive
-import argparse, random, shutil, subprocess, sys, json, csv, re
+import argparse, random, shutil, subprocess, sys, json, csv, re, os
 from pathlib import Path
 from datetime import datetime
+from contextlib import contextmanager
+from tqdm import tqdm  # Progress bar support
 
 import cv2
 import yaml
@@ -10,6 +12,20 @@ import numpy as np
 
 # Use relative path from script location for portability
 PROJ = Path(__file__).parent.resolve()
+
+@contextmanager
+def suppress_stdout_stderr():
+    """A context manager that redirects stdout and stderr to devnull"""
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
 # ---- Your dataset layout (images & labels) ----
 DAY_IMG_DIR   = PROJ / r"datasets\yolo_bdd100k\clear_daytime\images\test"
@@ -224,7 +240,7 @@ def is_night(img_bgr: np.ndarray, v_thresh=55.0, dark_ratio_thresh=0.35):
 # ---------- CycleGAN B->A ----------
 def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
                      norm="instance", no_dropout=True, netG="resnet_9blocks",
-                     load_size=286, crop_size=256, use_crop=False, epoch="latest"):
+                     load_size=286, crop_size=256, use_crop=False, epoch="latest", num_test=10000):
     """Use TestModel + --model_suffix _B (G_B: B->A). Save into results_root/<ckpt>/test_latest/images
     
     CRITICAL: use_crop should match training preprocess!
@@ -233,6 +249,7 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
     
     Args:
         epoch: Which checkpoint epoch to load (e.g., "50", "100", "latest")
+        num_test: Number of test images to process (default: 10000)
     """
     # Clean previous results to avoid mixing *_real and old outputs
     out_root = results_root / ckpt_name
@@ -245,7 +262,8 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
         "--model", "test", "--model_suffix", "_B", "--epoch", str(epoch),
         "--netG", netG, "--norm", norm,
         "--no_flip",
-        "--results_dir", str(results_root)
+        "--results_dir", str(results_root),
+        "--num_test", str(num_test)
     ]
     if no_dropout:
         cmd.append("--no_dropout")
@@ -259,12 +277,33 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
         cmd += ["--preprocess", "scale_width", "--load_size", str(crop_size), "--crop_size", str(crop_size)]
     
     print("[CycleGAN] ", " ".join(cmd))
-    result = subprocess.run(cmd, cwd=CYCLEGAN_REPO, capture_output=True, text=True)
-    if result.returncode != 0:
+    
+    # Use Popen to stream output and update progress bar
+    process = subprocess.Popen(
+        cmd, cwd=CYCLEGAN_REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', bufsize=1
+    )
+    
+    last_lines = []
+    with tqdm(total=num_test, unit="img", desc="CycleGAN Inference (B->A)") as pbar:
+        for line in process.stdout:
+            last_lines.append(line)
+            if len(last_lines) > 20: last_lines.pop(0)
+            
+            # Parse "processing (0005)-th image..."
+            m = re.search(r"processing\s+\((\d+)\)-th image", line)
+            if m:
+                idx = int(m.group(1))
+                pbar.n = idx + 1
+                pbar.refresh()
+                
+    rc = process.wait()
+    if rc != 0:
         print("❌ CycleGAN test.py 실행 실패!")
-        print("STDOUT:", result.stdout)
-        print("STDERR:", result.stderr)
-        raise RuntimeError(f"CycleGAN test failed with exit code {result.returncode}")
+        print("Last 20 lines of output:")
+        print("".join(last_lines))
+        raise RuntimeError(f"CycleGAN test failed with exit code {rc}")
     
     # 에폭 지정 시 test_<epoch> 폴더 생성됨
     test_folder = "test_latest" if epoch == "latest" else f"test_{epoch}"
@@ -275,7 +314,7 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
 
 def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
                      norm="instance", no_dropout=True, netG="resnet_9blocks",
-                     load_size=286, crop_size=256, use_crop=False, epoch="latest"):
+                     load_size=286, crop_size=256, use_crop=False, epoch="latest", num_test=10000):
     """Use TestModel + --model_suffix _A (G_A: A->B). Save into results_root/<ckpt>/test_latest/images"""
     # Clean previous results to avoid mixing *_real and old outputs
     out_root = results_root / ckpt_name
@@ -288,7 +327,8 @@ def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
         "--model", "test", "--model_suffix", "_A", "--epoch", str(epoch),
         "--netG", netG, "--norm", norm,
         "--no_flip",
-        "--results_dir", str(results_root)
+        "--results_dir", str(results_root),
+        "--num_test", str(num_test)
     ]
     if no_dropout:
         cmd.append("--no_dropout")
@@ -300,12 +340,33 @@ def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
         cmd += ["--preprocess", "scale_width", "--load_size", str(crop_size), "--crop_size", str(crop_size)]
     
     print("[CycleGAN A->B] ", " ".join(cmd))
-    result = subprocess.run(cmd, cwd=CYCLEGAN_REPO, capture_output=True, text=True)
-    if result.returncode != 0:
+    
+    # Use Popen to stream output and update progress bar
+    process = subprocess.Popen(
+        cmd, cwd=CYCLEGAN_REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', bufsize=1
+    )
+    
+    last_lines = []
+    with tqdm(total=num_test, unit="img", desc="CycleGAN Inference (A->B)") as pbar:
+        for line in process.stdout:
+            last_lines.append(line)
+            if len(last_lines) > 20: last_lines.pop(0)
+            
+            # Parse "processing (0005)-th image..."
+            m = re.search(r"processing\s+\((\d+)\)-th image", line)
+            if m:
+                idx = int(m.group(1))
+                pbar.n = idx + 1
+                pbar.refresh()
+                
+    rc = process.wait()
+    if rc != 0:
         print("❌ CycleGAN test.py 실행 실패!")
-        print("STDOUT:", result.stdout)
-        print("STDERR:", result.stderr)
-        raise RuntimeError(f"CycleGAN test failed with exit code {result.returncode}")
+        print("Last 20 lines of output:")
+        print("".join(last_lines))
+        raise RuntimeError(f"CycleGAN test failed with exit code {rc}")
     
     test_folder = "test_latest" if epoch == "latest" else f"test_{epoch}"
     out = results_root / ckpt_name / test_folder / "images"
@@ -371,24 +432,29 @@ def collect_fake_only_and_rename(cg_out_dir: Path, dst_dir: Path, original_img_d
     return n
 
 # ---------- YOLO ----------
-def run_yolo_val_api(model_path: Path, data_yaml: Path, split="test", imgsz=1280, device="0", save_dir: Path=None, save_txt=False, save_conf=False):
+def run_yolo_val_api(model_path: Path, data_yaml: Path, split="test", imgsz=1280, device="0", save_dir: Path=None, save_txt=False, save_conf=False, batch=16):
     from ultralytics import YOLO
     save_dir = save_dir or Path.cwd() / "yolo_api_out"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     model = YOLO(str(model_path))
-    metrics = model.val(
-        data=str(data_yaml),
-        split=split,
-        imgsz=imgsz,
-        device=device,
-        project=str(save_dir),
-        name=".",
-        exist_ok=True,
-        verbose=False,
-        save_txt=save_txt,
-        save_conf=save_conf,
-    )
+    
+    # Suppress YOLO verbose output (progress bars, scanning messages)
+    # If you want to see progress for large datasets, comment out the context manager
+    with suppress_stdout_stderr():
+        metrics = model.val(
+            data=str(data_yaml),
+            split=split,
+            imgsz=imgsz,
+            device=device,
+            project=str(save_dir),
+            name=".",
+            exist_ok=True,
+            verbose=False,
+            save_txt=save_txt,
+            save_conf=save_conf,
+            batch=batch,
+        )
     # metrics.box: Namespace(map50_95, map50, mp, mr, ...)
     return {
         "mAP50-95": float(metrics.box.map) if hasattr(metrics, "box") else None,

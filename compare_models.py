@@ -51,7 +51,7 @@ CROP_SIZE = 1024
 # ===============================================
 
 
-def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction='night2day'):
+def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction='night2day', skip_gen=False):
     """
     두 CycleGAN 모델을 비교합니다.
     
@@ -60,6 +60,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         device: GPU device ID
         yolo_model: YOLO 모델 경로
         direction: 'night2day' or 'day2night'
+        skip_gen: True일 경우 샘플링 및 변환 과정을 건너뜀
     """
     print("\n" + "="*60)
     print(f"  CycleGAN vs CycleGAN+YOLO 비교 실험 ({direction})")
@@ -95,77 +96,102 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         
         fake_tgt_label = "Fake Night"
 
-    # 실험 디렉터리 초기화
-    if exp_root.exists():
-        print(f"🗑️  기존 {exp_root.name} 폴더 삭제 중...")
-        shutil.rmtree(exp_root)
-        print("✓ 삭제 완료\n")
-    exp_root.mkdir(exist_ok=True)
+    # 실험 디렉터리 초기화 (skip_gen이 아닐 때만 삭제)
+    if not skip_gen:
+        if exp_root.exists():
+            print(f"🗑️  기존 {exp_root.name} 폴더 삭제 중...")
+            shutil.rmtree(exp_root)
+            print("✓ 삭제 완료\n")
+        exp_root.mkdir(exist_ok=True)
+    else:
+        if not exp_root.exists():
+            print(f"❌ 기존 결과 폴더가 없습니다: {exp_root}")
+            return
+        print(f"⏩ 기존 결과 폴더를 재사용합니다: {exp_root}")
+        
+        # YOLO 결과 폴더만 초기화 (평가는 다시 해야 하므로)
+        yolo_results_dir = exp_root / "yolo_results"
+        if yolo_results_dir.exists():
+            print(f"🗑️  기존 YOLO 결과 폴더 삭제 중 ({yolo_results_dir.name})...")
+            shutil.rmtree(yolo_results_dir)
+        yolo_results_dir.mkdir(exist_ok=True)
     
-    # ========== 1. 데이터 샘플링 ==========
-    print(f"📂 Step 1: 데이터 샘플링 ({src_name} -> {tgt_name})...")
-    
-    # 1-1. Source Sampling (Input)
+    # 경로 정의
     src_input = exp_root / "inputs" / src_name
-    sample_subset(
-        src_root=src_path,
-        dest_root=src_input,
-        n_samples=n_samples,
-        copy_labels=True
-    )
-    
-    # 1-2. Target Sampling (Reference - for structure only, not evaluated)
     tgt_input = exp_root / "inputs" / tgt_name
-    sample_subset(
-        src_root=tgt_path,
-        dest_root=tgt_input,
-        n_samples=n_samples,
-        copy_labels=True
-    )
-    
-    print(f"✓ {n_samples}개 샘플 준비 완료\n")
+    baseline_out = exp_root / "outputs" / "baseline"
+    yolo_out = exp_root / "outputs" / "yolo"
+    baseline_img_dir = baseline_out / BASELINE_CKPT_NAME / "test_latest" / "images"
+    yolo_img_dir = yolo_out / OURS_CKPT_NAME / "test_latest" / "images"
+
+    # ========== 1. 데이터 샘플링 ==========
+    if not skip_gen:
+        print(f"📂 Step 1: 데이터 샘플링 ({src_name} -> {tgt_name})...")
+        
+        # 1-1. Source Sampling (Input)
+        sample_subset(
+            src_root=src_path,
+            dest_root=src_input,
+            n_samples=n_samples,
+            copy_labels=True
+        )
+        
+        # 1-2. Target Sampling (Reference - for structure only, not evaluated)
+        sample_subset(
+            src_root=tgt_path,
+            dest_root=tgt_input,
+            n_samples=n_samples,
+            copy_labels=True
+        )
+        print(f"✓ {n_samples}개 샘플 준비 완료\n")
+    else:
+        print(f"⏩ Step 1: 데이터 샘플링 건너뜀 (기존 데이터 사용)")
 
     # ========== 2. Baseline 변환 ==========
-    print(f"🔄 Step 2: Baseline (순수 CycleGAN) 변환 ({src_name}->{tgt_name})...")
-    
-    baseline_out = exp_root / "outputs" / "baseline"
-    try:
-        # run_cyclegan returns the final image directory
-        baseline_img_dir = run_baseline(
-            input_dir=src_input / "images",
-            results_root=baseline_out,
-            ckpt_name=BASELINE_CKPT_NAME,
-            epoch=BASELINE_EPOCH,
-            netG=BASELINE_NETG,
-            norm=NORM, no_dropout=NO_DROPOUT,
-            use_crop=USE_CROP, load_size=LOAD_SIZE, crop_size=CROP_SIZE
-        )
-        print("✓ Baseline 변환 완료")
-    except Exception as e:
-        print(f"❌ Baseline 변환 실패: {e}")
-        traceback.print_exc()
-        return
+    if not skip_gen:
+        print(f"🔄 Step 2: Baseline (순수 CycleGAN) 변환 ({src_name}->{tgt_name})...")
+        try:
+            # run_cyclegan returns the final image directory
+            baseline_img_dir = run_baseline(
+                input_dir=src_input / "images",
+                results_root=baseline_out,
+                ckpt_name=BASELINE_CKPT_NAME,
+                epoch=BASELINE_EPOCH,
+                netG=BASELINE_NETG,
+                norm=NORM, no_dropout=NO_DROPOUT,
+                use_crop=USE_CROP, load_size=LOAD_SIZE, crop_size=CROP_SIZE,
+                num_test=n_samples
+            )
+            print("✓ Baseline 변환 완료")
+        except Exception as e:
+            print(f"❌ Baseline 변환 실패: {e}")
+            traceback.print_exc()
+            return
+    else:
+        print(f"⏩ Step 2: Baseline 변환 건너뜀")
 
     # ========== 3. Ours 변환 ==========
-    print(f"\n🔄 Step 3: Ours (CycleGAN+YOLO) 변환 ({src_name}->{tgt_name})...")
-    
-    yolo_out = exp_root / "outputs" / "yolo"
-    try:
-        # run_cyclegan returns the final image directory
-        yolo_img_dir = run_ours(
-            input_dir=src_input / "images",
-            results_root=yolo_out,
-            ckpt_name=OURS_CKPT_NAME,
-            epoch=OURS_EPOCH,
-            netG=OURS_NETG,
-            norm=NORM, no_dropout=NO_DROPOUT,
-            use_crop=USE_CROP, load_size=LOAD_SIZE, crop_size=CROP_SIZE
-        )
-        print("✓ YOLO 모델 변환 완료")
-    except Exception as e:
-        print(f"❌ Ours 변환 실패: {e}")
-        traceback.print_exc()
-        return
+    if not skip_gen:
+        print(f"\n🔄 Step 3: Ours (CycleGAN+YOLO) 변환 ({src_name}->{tgt_name})...")
+        try:
+            # run_cyclegan returns the final image directory
+            yolo_img_dir = run_ours(
+                input_dir=src_input / "images",
+                results_root=yolo_out,
+                ckpt_name=OURS_CKPT_NAME,
+                epoch=OURS_EPOCH,
+                netG=OURS_NETG,
+                norm=NORM, no_dropout=NO_DROPOUT,
+                use_crop=USE_CROP, load_size=LOAD_SIZE, crop_size=CROP_SIZE,
+                num_test=n_samples
+            )
+            print("✓ YOLO 모델 변환 완료")
+        except Exception as e:
+            print(f"❌ Ours 변환 실패: {e}")
+            traceback.print_exc()
+            return
+    else:
+        print(f"⏩ Step 3: Ours 변환 건너뜀")
 
     # ========== 4. YOLO 평가 준비 ==========
     print("\n📋 Step 4: YOLO 평가 준비...")
@@ -201,7 +227,8 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         device=device,
         save_dir=exp_root / "yolo_results" / "source",
         save_txt=True,
-        save_conf=True
+        save_conf=True,
+        batch=32  # RTX 5080 최적화
     )
     
     # 5-2. Baseline (Fake Target)
@@ -214,7 +241,8 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         device=device,
         save_dir=exp_root / "yolo_results" / "baseline",
         save_txt=True,
-        save_conf=True
+        save_conf=True,
+        batch=32  # RTX 5080 최적화
     )
     
     # 5-3. Ours (Fake Target)
@@ -227,7 +255,8 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         device=device,
         save_dir=exp_root / "yolo_results" / "yolo",
         save_txt=True,
-        save_conf=True
+        save_conf=True,
+        batch=32  # RTX 5080 최적화
     )
     
     # ========== 6. Ensemble 평가 ==========
@@ -257,7 +286,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
                 img_dir=src_input / "images",
                 names=NAMES,
                 img_w=1280, img_h=720,
-                iou_thres=0.5, conf_thres=0.25,
+                iou_thres=0.5, conf_thres=0.001,
                 save_dir=exp_root / "yolo_results" / "ensemble"
             )
         else:
@@ -272,7 +301,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
                 img_dir=src_input / "images",
                 names=NAMES,
                 img_w=1280, img_h=720,
-                iou_thres=0.5, conf_thres=0.25,
+                iou_thres=0.5, conf_thres=0.001,
                 save_dir=exp_root / "yolo_results" / "ensemble_baseline"
             )
         else:
@@ -386,6 +415,8 @@ if __name__ == "__main__":
                         help='YOLO 모델 경로 (기본: yolo11s.pt)')
     parser.add_argument('--direction', type=str, default='night2day', choices=['night2day', 'day2night'],
                         help='변환 방향 (night2day 또는 day2night)')
+    parser.add_argument('--skip_gen', action='store_true',
+                        help='데이터 샘플링 및 CycleGAN 변환 과정을 건너뛰고 기존 결과로 평가만 수행')
     
     args = parser.parse_args()
     
@@ -393,5 +424,6 @@ if __name__ == "__main__":
         n_samples=args.n_samples,
         device=args.device,
         yolo_model=args.yolo_model,
-        direction=args.direction
+        direction=args.direction,
+        skip_gen=args.skip_gen
     )

@@ -347,9 +347,17 @@ def plot_curves(plot_data, save_dir, mAP, names=None):
             # Interpolate precision at 1000 recall points
             r_orig = data['recall']
             p_orig = data['precision']
+
+            # Fix for Horizontal Flatline: 
+            # If the curve ends before Recall=1.0, we must drop Precision to 0.0 at Recall=1.0.
+            # Otherwise np.interp will extrapolate the last precision value (flatline).
+            if len(r_orig) > 0 and r_orig[-1] < 1.0:
+                r_orig = np.concatenate([r_orig, [1.0]])
+                p_orig = np.concatenate([p_orig, [0.0]])
+
             # Sort by recall for interpolation
             sort_idx = np.argsort(r_orig)
-            p_interp = np.interp(x, r_orig[sort_idx], p_orig[sort_idx])
+            p_interp = np.interp(x, r_orig[sort_idx], p_orig[sort_idx], left=1.0, right=0.0)
             
             # px_pr.append(x)
             py_pr.append(p_interp)
