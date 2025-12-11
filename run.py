@@ -274,7 +274,7 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
         cmd += ["--preprocess", "resize_and_crop", "--load_size", str(load_size), "--crop_size", str(crop_size)]
     else:
         # Use scale_width to preserve aspect ratio better for YOLO
-        cmd += ["--preprocess", "scale_width", "--load_size", str(crop_size), "--crop_size", str(crop_size)]
+        cmd += ["--preprocess", "scale_width", "--load_size", str(load_size), "--crop_size", str(crop_size)]
     
     print("[CycleGAN] ", " ".join(cmd))
     
@@ -310,6 +310,17 @@ def run_cyclegan_b2a(input_dir: Path, results_root: Path, ckpt_name: str,
     out = results_root / ckpt_name / test_folder / "images"
     if not out.exists():
         raise RuntimeError(f"CycleGAN results not found: {out}")
+    
+    # Cleanup: Delete *_real.png files to save space
+    print("🧹 Cleaning up real images to save space...")
+    real_imgs = list(out.glob("*_real.png"))
+    for img in real_imgs:
+        try:
+            img.unlink()
+        except Exception as e:
+            print(f"Warning: Failed to delete {img.name}: {e}")
+    print(f"✓ Deleted {len(real_imgs)} real images")
+
     return out
 
 def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
@@ -337,7 +348,7 @@ def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
     if use_crop:
         cmd += ["--preprocess", "resize_and_crop", "--load_size", str(load_size), "--crop_size", str(crop_size)]
     else:
-        cmd += ["--preprocess", "scale_width", "--load_size", str(crop_size), "--crop_size", str(crop_size)]
+        cmd += ["--preprocess", "scale_width", "--load_size", str(load_size), "--crop_size", str(crop_size)]
     
     print("[CycleGAN A->B] ", " ".join(cmd))
     
@@ -372,6 +383,17 @@ def run_cyclegan_a2b(input_dir: Path, results_root: Path, ckpt_name: str,
     out = results_root / ckpt_name / test_folder / "images"
     if not out.exists():
         raise RuntimeError(f"CycleGAN results not found: {out}")
+
+    # Cleanup: Delete *_real.png files to save space
+    print("🧹 Cleaning up real images to save space...")
+    real_imgs = list(out.glob("*_real.png"))
+    for img in real_imgs:
+        try:
+            img.unlink()
+        except Exception as e:
+            print(f"Warning: Failed to delete {img.name}: {e}")
+    print(f"✓ Deleted {len(real_imgs)} real images")
+
     return out
 
 def copy_dir_imgs(src_dir: Path, dst_dir: Path):

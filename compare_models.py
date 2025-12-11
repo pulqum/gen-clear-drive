@@ -46,8 +46,8 @@ OURS_NETG = "resnet_9blocks"
 NORM = "instance"
 NO_DROPOUT = True
 USE_CROP = False  # scale_width 사용
-LOAD_SIZE = 1024
-CROP_SIZE = 1024
+LOAD_SIZE = 1280  # 원본 너비에 맞춤 (1280x720)
+CROP_SIZE = 256   # scale_width 모드에서 최소 높이로 작동하므로, 원본 높이(720)보다 작게 설정하여 비율 유지
 # ===============================================
 
 
@@ -228,7 +228,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         save_dir=exp_root / "yolo_results" / "source",
         save_txt=True,
         save_conf=True,
-        batch=32  # RTX 5080 최적화
+        batch=16  # OOM 방지를 위해 16으로 하향 조정
     )
     
     # 5-2. Baseline (Fake Target)
@@ -242,7 +242,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         save_dir=exp_root / "yolo_results" / "baseline",
         save_txt=True,
         save_conf=True,
-        batch=32  # RTX 5080 최적화
+        batch=16  # OOM 방지를 위해 16으로 하향 조정
     )
     
     # 5-3. Ours (Fake Target)
@@ -256,7 +256,7 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         save_dir=exp_root / "yolo_results" / "yolo",
         save_txt=True,
         save_conf=True,
-        batch=32  # RTX 5080 최적화
+        batch=16  # OOM 방지를 위해 16으로 하향 조정
     )
     
     # ========== 6. Ensemble 평가 ==========

@@ -132,7 +132,9 @@ def evaluate_ensemble(gt_dir, pred_dirs, img_dir=None, names=None, img_w=1280, i
             
         # NMS
         if len(preds) > 0:
-            keep = torchvision.ops.nms(preds[:, 1:5], preds[:, 5], iou_thres)
+            # Use batched_nms to perform NMS independently for each class
+            # preds[:, 0] is class index
+            keep = torchvision.ops.batched_nms(preds[:, 1:5], preds[:, 5], preds[:, 0], iou_thres)
             preds = preds[keep]
             
         # Filter by conf
