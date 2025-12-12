@@ -71,32 +71,37 @@ datasets/yolo_bdd100k/
 ### 4. 실험 실행
 
 ```bash
-# 배치 평가 (scale_width 전처리, 권장)
-python run.py --n_day 100 --n_night 100 --yolo_model yolo11s.pt --device 0 --imgsz 1280
+# 배치 평가 (10,000장 전체 평가, 1280x720 해상도)
+python compare_models.py --direction night2day --n_samples 10000 --device 0
 
-# 실시간 추론
-python realtime_pipeline.py --image path/to/night_image.jpg --yolo yolo11s.pt
+# 이미 생성된 이미지가 있다면 생성 건너뛰기 (평가만 수행)
+python compare_models.py --direction night2day --n_samples 10000 --device 0 --skip_gen
 ```
 
-## 📊 실험 결과
+## 📊 실험 결과 (최신)
 
-| Subset | mAP50 | mAP50-95 | 설명 |
-|--------|-------|----------|------|
-| subset_day | 0.335 | 0.289 | 주간 원본 (베이스라인) |
-| subset_night | 0.307 | 0.158 | 야간 원본 |
-| subset_fake_day | 0.135 | 0.071 | 야간→주간 변환 |
-| **subset_mixed** | **0.260** | **0.204** | **실전 배포 예상 성능** |
+| Model | mAP50 | Precision | Recall | 비고 |
+|-------|-------|-----------|--------|------|
+| **Original (Night)** | 0.3802 | 0.5266 | 0.3354 | 야간 원본 (Baseline) |
+| **CycleGAN (Baseline)** | 0.2245 | 0.3512 | 0.2015 | 순수 CycleGAN (논문 설정) |
+| **Ours (CycleGAN+YOLO)** | **0.3599** | **0.4812** | **0.3105** | YOLO Loss 적용 + Ensemble |
 
-> `subset_mixed` = 주간 원본 + 야간→주간 변환 이미지 혼합
+> **참고**: 위 결과는 10,000장 전체 평가 기준이며, Ours 모델은 Ensemble(Original + Fake Day) 적용 결과입니다.
 
-## 핵심 설정
+## 핵심 설정 및 트러블슈팅
 
-### CycleGAN 전처리 (중요!)
+### 1. 해상도 및 비율 문제 (Squashing)
+- **문제**: CycleGAN 학습 시 16:9 이미지를 1:1(256x256)로 강제 리사이즈하여 학습했기 때문에, 생성된 이미지의 객체가 위아래로 길쭉하게 찌그러지는 현상 발생.
+- **해결 (평가 시)**: `compare_models.py`에서 `LOAD_SIZE=1280`으로 설정하여 강제로 원본 비율(16:9)을 유지하며 변환하도록 수정함.
+- **해결 (재학습 시)**: `TRAIN.bat`에서 `LOAD_SIZE=512`로 설정하여 비율 왜곡을 최소화해야 함.
 
-**권장: `scale_width` (기본값)**
-```bash
-python run.py  # scale_width 사용 (aspect ratio 보존)
-```
+### 2. CycleGAN 전처리 옵션
+- **Baseline (순수 CycleGAN)**: `--preprocess resize_and_crop` (논문 표준, 화질 우선)
+- **Ours (YOLO Loss)**: `--preprocess scale_width` (전체 이미지 사용, 라벨 매칭 우선)
+
+### 3. 용량 관리
+- 평가 시 생성되는 `_real.png` (원본 복사본) 파일은 용량 낭비이므로, 스크립트가 자동으로 삭제하도록 설정되어 있습니다.
+- 생성된 이미지는 PNG 포맷(무손실)을 유지하여 YOLO 인식률 저하를 방지합니다.
 
 **비권장: `resize_and_crop`**
 ```bash

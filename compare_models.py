@@ -74,8 +74,8 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         src_path = PROJ / "datasets" / "yolo_bdd100k" / "clear_night"
         tgt_path = PROJ / "datasets" / "yolo_bdd100k" / "clear_daytime"
         
-        # Baseline (Standard CycleGAN: A=Day, B=Night) -> Night to Day is B->A
-        run_baseline = run_cyclegan_b2a
+        # Baseline (Now Swapped: A=Night, B=Day) -> Night to Day is A->B
+        run_baseline = run_cyclegan_a2b
         
         # Ours (Custom CycleGAN: A=Night, B=Day) -> Night to Day is A->B
         run_ours = run_cyclegan_a2b
@@ -88,8 +88,8 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         src_path = PROJ / "datasets" / "yolo_bdd100k" / "clear_daytime"
         tgt_path = PROJ / "datasets" / "yolo_bdd100k" / "clear_night"
         
-        # Baseline (Standard CycleGAN: A=Day, B=Night) -> Day to Night is A->B
-        run_baseline = run_cyclegan_a2b
+        # Baseline (Now Swapped: A=Night, B=Day) -> Day to Night is B->A
+        run_baseline = run_cyclegan_b2a
         
         # Ours (Custom CycleGAN: A=Night, B=Day) -> Day to Night is B->A
         run_ours = run_cyclegan_b2a
