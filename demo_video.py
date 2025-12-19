@@ -79,7 +79,7 @@ class NightToDayDemo:
         dark_ratio = (V < 40).sum() / V.size
         return (mean_v < v_thresh) and (dark_ratio > dark_ratio_thresh)
 
-    def ensemble_results(self, res1, res2, iou_thres=0.5):
+    def ensemble_results(self, res1, res2, iou_thres=0.55):
         # Extract boxes from both results
         boxes1 = res1[0].boxes
         boxes2 = res2[0].boxes
@@ -92,19 +92,175 @@ class NightToDayDemo:
         if boxes2.shape[0] == 0:
             return boxes1.data
             
-        # Concatenate: boxes.data is [x1, y1, x2, y2, conf, cls]
-        cat_boxes = torch.cat([boxes1.data, boxes2.data], dim=0)
+        # Prepare for WBF (Weighted Box Fusion)
+        # boxes.data is [x1, y1, x2, y2, conf, cls]
         
-        # Batched NMS (Class-Aware) - Matches compare_models.py logic
-        # torchvision.ops.batched_nms ensures NMS is applied independently for each class
-        keep_indices = torchvision.ops.batched_nms(
-            cat_boxes[:, :4], 
-            cat_boxes[:, 4], 
-            cat_boxes[:, 5],  # Class indices
-            iou_thres
+        # Convert to list format for WBF
+        boxes_list = []
+        scores_list = []
+        labels_list = []
+        
+        # Model 1 (Original)
+        if boxes1.shape[0] > 0:
+            b1 = boxes1.data.cpu().numpy()
+            # Normalize coordinates [0, 1]
+            b1_norm = b1[:, :4].copy()
+            b1_norm[:, 0] /= self.imgsz[0]
+            b1_norm[:, 2] /= self.imgsz[0]
+            b1_norm[:, 1] /= self.imgsz[1]
+            b1_norm[:, 3] /= self.imgsz[1]
+            
+            boxes_list.append(b1_norm)
+            scores_list.append(b1[:, 4])
+            labels_list.append(b1[:, 5])
+        else:
+            boxes_list.append(np.zeros((0, 4)))
+            scores_list.append(np.zeros((0,)))
+            labels_list.append(np.zeros((0,)))
+            
+        # Model 2 (CycleGAN)
+        if boxes2.shape[0] > 0:
+            b2 = boxes2.data.cpu().numpy()
+            # Normalize coordinates [0, 1]
+            b2_norm = b2[:, :4].copy()
+            b2_norm[:, 0] /= self.imgsz[0]
+            b2_norm[:, 2] /= self.imgsz[0]
+            b2_norm[:, 1] /= self.imgsz[1]
+            b2_norm[:, 3] /= self.imgsz[1]
+            
+            boxes_list.append(b2_norm)
+            scores_list.append(b2[:, 4])
+            labels_list.append(b2[:, 5])
+        else:
+            boxes_list.append(np.zeros((0, 4)))
+            scores_list.append(np.zeros((0,)))
+            labels_list.append(np.zeros((0,)))
+            
+        # Run WBF (Simple Numpy Implementation)
+        wbf_boxes, wbf_scores, wbf_labels = self.weighted_boxes_fusion(
+            boxes_list, scores_list, labels_list, iou_thr=iou_thres
         )
         
-        return cat_boxes[keep_indices]
+        if len(wbf_boxes) == 0:
+            return None
+            
+        # Denormalize and format back to [x1, y1, x2, y2, conf, cls]
+        wbf_boxes[:, 0] *= self.imgsz[0]
+        wbf_boxes[:, 2] *= self.imgsz[0]
+        wbf_boxes[:, 1] *= self.imgsz[1]
+        wbf_boxes[:, 3] *= self.imgsz[1]
+        
+        # Construct result array
+        # [x1, y1, x2, y2, conf, cls]
+        result = np.zeros((len(wbf_boxes), 6))
+        result[:, :4] = wbf_boxes
+        result[:, 4] = wbf_scores
+        result[:, 5] = wbf_labels
+        
+        return torch.from_numpy(result).float().to(self.device)
+
+    def box_iou_numpy(self, box1, box2):
+        # box: x1, y1, x2, y2
+        xi1 = max(box1[0], box2[0])
+        yi1 = max(box1[1], box2[1])
+        xi2 = min(box1[2], box2[2])
+        yi2 = min(box1[3], box2[3])
+        inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union_area = box1_area + box2_area - inter_area
+        return inter_area / (union_area + 1e-16)
+
+    def weighted_boxes_fusion(self, boxes_list, scores_list, labels_list, weights=None, iou_thr=0.55, skip_box_thr=0.0):
+        """
+        Weighted Box Fusion implementation (Numpy).
+        """
+        if weights is None:
+            weights = [1.0] * len(boxes_list)
+
+        filtered_boxes = []
+        filtered_scores = []
+        filtered_labels = []
+        
+        # Flatten and filter
+        for i in range(len(boxes_list)):
+            boxes = boxes_list[i]
+            scores = scores_list[i]
+            labels = labels_list[i]
+            
+            for j in range(len(boxes)):
+                score = scores[j]
+                if score < skip_box_thr:
+                    continue
+                filtered_boxes.append(boxes[j])
+                filtered_scores.append(score)
+                filtered_labels.append(labels[j])
+
+        if len(filtered_boxes) == 0:
+            return np.zeros((0, 4)), np.zeros((0,)), np.zeros((0,))
+        
+        filtered_boxes = np.array(filtered_boxes)
+        filtered_scores = np.array(filtered_scores)
+        filtered_labels = np.array(filtered_labels)
+        
+        # Sort by score descending
+        order = filtered_scores.argsort()[::-1]
+        filtered_boxes = filtered_boxes[order]
+        filtered_scores = filtered_scores[order]
+        filtered_labels = filtered_labels[order]
+        
+        clusters = []
+        
+        for i in range(len(filtered_boxes)):
+            box = filtered_boxes[i]
+            score = filtered_scores[i]
+            label = filtered_labels[i]
+            
+            matching_cluster_idx = -1
+            best_iou = -1
+            
+            for c_idx, cluster in enumerate(clusters):
+                if cluster['label'] != label:
+                    continue
+                
+                iou = self.box_iou_numpy(box, cluster['avg_box'])
+                if iou > best_iou:
+                    best_iou = iou
+                    matching_cluster_idx = c_idx
+            
+            if best_iou > iou_thr:
+                clusters[matching_cluster_idx]['boxes'].append(box)
+                clusters[matching_cluster_idx]['scores'].append(score)
+                
+                # Update avg box
+                c = clusters[matching_cluster_idx]
+                c_boxes = np.array(c['boxes'])
+                c_scores = np.array(c['scores'])
+                c['avg_box'] = np.average(c_boxes, axis=0, weights=c_scores)
+            else:
+                clusters.append({
+                    'label': label,
+                    'boxes': [box],
+                    'scores': [score],
+                    'avg_box': box
+                })
+                
+        final_boxes = []
+        final_scores = []
+        final_labels = []
+        
+        for c in clusters:
+            avg_box = c['avg_box']
+            # Standard WBF confidence: sum(scores) / N_models
+            final_score = np.sum(c['scores']) / len(boxes_list)
+            # Clip score to 1.0
+            final_score = min(final_score, 1.0)
+            
+            final_boxes.append(avg_box)
+            final_scores.append(final_score)
+            final_labels.append(c['label'])
+            
+        return np.array(final_boxes), np.array(final_scores), np.array(final_labels)
 
     def run(self, source, save_path=None):
         # Open video source
@@ -233,7 +389,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=str, default="0", help="Video path or webcam index")
     # Baseline uses G_B (Night->Day) because it was trained as Day(A)->Night(B)
-    parser.add_argument("--ckpt", type=str, default="pytorch-CycleGAN-and-pix2pix/checkpoints/clear_d2n_baseline_scalewidth_e100_k5k/latest_net_G_B.pth", help="CycleGAN Generator path")
+    parser.add_argument("--ckpt", type=str, default="pytorch-CycleGAN-and-pix2pix/checkpoints/clear_n2d_yolo_v3_lambda3_scalewidth_e100_k5k/latest_net_G_A.pth", help="CycleGAN Generator path")
     parser.add_argument("--yolo", type=str, default="yolo11s.pt", help="YOLO model path")
     parser.add_argument("--imgsz", type=int, nargs=2, default=[1280, 720], help="Inference size (W H)")
     parser.add_argument("--save", type=str, default=None, help="Path to save output video (e.g. output.mp4)")
@@ -244,7 +400,7 @@ if __name__ == "__main__":
     if not ckpt_path.exists():
         # Fallback to ours if baseline not found
         # Ours uses G_A (Night->Day) because it was trained as Night(A)->Day(B)
-        fallback = PROJ / "pytorch-CycleGAN-and-pix2pix/checkpoints/clear_d2n_yolo_v3_lambda3_scalewidth_e100_k5k/latest_net_G_A.pth"
+        fallback = PROJ / "pytorch-CycleGAN-and-pix2pix/checkpoints/clear_n2d_baseline_scalewidth_e100_k5k/latest_net_G_A.pth.pth"
         if fallback.exists():
             print(f"⚠️ Checkpoint not found: {ckpt_path}")
             print(f"🔄 Falling back to: {fallback}")

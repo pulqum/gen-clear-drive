@@ -79,7 +79,110 @@ def load_yolo_labels(path, img_w=1280, img_h=720):
     
     return torch.tensor(data)
 
-def evaluate_ensemble(gt_dir, pred_dirs, img_dir=None, names=None, img_w=1280, img_h=720, iou_thres=0.5, conf_thres=0.001, save_dir=None):
+def box_iou_numpy(box1, box2):
+    # box: x1, y1, x2, y2
+    xi1 = max(box1[0], box2[0])
+    yi1 = max(box1[1], box2[1])
+    xi2 = min(box1[2], box2[2])
+    yi2 = min(box1[3], box2[3])
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union_area = box1_area + box2_area - inter_area
+    return inter_area / (union_area + 1e-16)
+
+def weighted_boxes_fusion(boxes_list, scores_list, labels_list, weights=None, iou_thr=0.55, skip_box_thr=0.0):
+    """
+    Weighted Box Fusion implementation (Numpy).
+    """
+    if weights is None:
+        weights = [1.0] * len(boxes_list)
+
+    filtered_boxes = []
+    filtered_scores = []
+    filtered_labels = []
+    
+    # Flatten and filter
+    for i in range(len(boxes_list)):
+        boxes = boxes_list[i]
+        scores = scores_list[i]
+        labels = labels_list[i]
+        
+        for j in range(len(boxes)):
+            score = scores[j]
+            if score < skip_box_thr:
+                continue
+            filtered_boxes.append(boxes[j])
+            filtered_scores.append(score)
+            filtered_labels.append(labels[j])
+
+    if len(filtered_boxes) == 0:
+        return np.zeros((0, 4)), np.zeros((0,)), np.zeros((0,))
+    
+    filtered_boxes = np.array(filtered_boxes)
+    filtered_scores = np.array(filtered_scores)
+    filtered_labels = np.array(filtered_labels)
+    
+    # Sort by score descending
+    order = filtered_scores.argsort()[::-1]
+    filtered_boxes = filtered_boxes[order]
+    filtered_scores = filtered_scores[order]
+    filtered_labels = filtered_labels[order]
+    
+    clusters = []
+    
+    for i in range(len(filtered_boxes)):
+        box = filtered_boxes[i]
+        score = filtered_scores[i]
+        label = filtered_labels[i]
+        
+        matching_cluster_idx = -1
+        best_iou = -1
+        
+        for c_idx, cluster in enumerate(clusters):
+            if cluster['label'] != label:
+                continue
+            
+            iou = box_iou_numpy(box, cluster['avg_box'])
+            if iou > best_iou:
+                best_iou = iou
+                matching_cluster_idx = c_idx
+        
+        if best_iou > iou_thr:
+            clusters[matching_cluster_idx]['boxes'].append(box)
+            clusters[matching_cluster_idx]['scores'].append(score)
+            
+            # Update avg box
+            c = clusters[matching_cluster_idx]
+            c_boxes = np.array(c['boxes'])
+            c_scores = np.array(c['scores'])
+            c['avg_box'] = np.average(c_boxes, axis=0, weights=c_scores)
+        else:
+            clusters.append({
+                'label': label,
+                'boxes': [box],
+                'scores': [score],
+                'avg_box': box
+            })
+            
+    final_boxes = []
+    final_scores = []
+    final_labels = []
+    
+    for c in clusters:
+        avg_box = c['avg_box']
+        # Standard WBF confidence: sum(scores) / N_models
+        final_score = np.sum(c['scores']) / len(boxes_list)
+        # Clip score to 1.0
+        final_score = min(final_score, 1.0)
+        
+        final_boxes.append(avg_box)
+        final_scores.append(final_score)
+        final_labels.append(c['label'])
+        
+    return np.array(final_boxes), np.array(final_scores), np.array(final_labels)
+
+def evaluate_ensemble(gt_dir, pred_dirs, img_dir=None, names=None, img_w=1280, img_h=720, iou_thres=0.5, conf_thres=0.001, save_dir=None, method='nms'):
     """
     Evaluate ensemble of multiple prediction directories against GT.
     
@@ -109,33 +212,75 @@ def evaluate_ensemble(gt_dir, pred_dirs, img_dir=None, names=None, img_w=1280, i
         # Load GT
         gt = load_yolo_labels(gt_path, img_w, img_h) # [cls, x1, y1, x2, y2, 1.0]
         
-        # Load and Merge Preds
-        all_preds = []
+        # Load Preds per model
+        preds_list_per_model = []
         for d in pred_dirs:
             p_path = d / (stem + ".txt")
             preds = load_yolo_labels(p_path, img_w, img_h)
-            if len(preds) > 0:
-                all_preds.append(preds)
-            # Debug: Check if file exists but empty or not found
-            elif not os.path.exists(p_path):
-                # Try with _fake_A suffix if not found
+            
+            # Try with _fake_A suffix if not found
+            if len(preds) == 0 and not os.path.exists(p_path):
                 p_path_fake = d / (stem + "_fake_A.txt")
                 if os.path.exists(p_path_fake):
                     preds = load_yolo_labels(p_path_fake, img_w, img_h)
-                    if len(preds) > 0:
-                        all_preds.append(preds)
-        
-        if not all_preds:
-            preds = torch.zeros((0, 6))
-        else:
-            preds = torch.cat(all_preds, 0)
             
-        # NMS
-        if len(preds) > 0:
-            # Use batched_nms to perform NMS independently for each class
-            # preds[:, 0] is class index
-            keep = torchvision.ops.batched_nms(preds[:, 1:5], preds[:, 5], preds[:, 0], iou_thres)
-            preds = preds[keep]
+            preds_list_per_model.append(preds)
+
+        if method == 'wbf':
+             # Prepare for WBF
+             boxes_list = []
+             scores_list = []
+             labels_list = []
+             
+             for preds in preds_list_per_model:
+                 if len(preds) > 0:
+                     # Normalize boxes for WBF
+                     boxes = preds[:, 1:5].clone()
+                     boxes[:, 0] /= img_w
+                     boxes[:, 2] /= img_w
+                     boxes[:, 1] /= img_h
+                     boxes[:, 3] /= img_h
+                     boxes_list.append(boxes.numpy())
+                     scores_list.append(preds[:, 5].numpy())
+                     labels_list.append(preds[:, 0].numpy())
+                 else:
+                     boxes_list.append(np.zeros((0, 4)))
+                     scores_list.append(np.zeros((0,)))
+                     labels_list.append(np.zeros((0,)))
+            
+             wbf_boxes, wbf_scores, wbf_labels = weighted_boxes_fusion(boxes_list, scores_list, labels_list, iou_thr=iou_thres)
+             
+             # Convert back to Tensor [N, 6]
+             if len(wbf_boxes) > 0:
+                 # Denormalize
+                 wbf_boxes[:, 0] *= img_w
+                 wbf_boxes[:, 2] *= img_w
+                 wbf_boxes[:, 1] *= img_h
+                 wbf_boxes[:, 3] *= img_h
+                 
+                 # Construct preds tensor
+                 # [cls, x1, y1, x2, y2, conf]
+                 new_preds = torch.zeros((len(wbf_boxes), 6))
+                 new_preds[:, 0] = torch.from_numpy(wbf_labels)
+                 new_preds[:, 1:5] = torch.from_numpy(wbf_boxes)
+                 new_preds[:, 5] = torch.from_numpy(wbf_scores)
+                 preds = new_preds
+             else:
+                 preds = torch.zeros((0, 6))
+
+        else: # NMS (Default)
+            all_preds = [p for p in preds_list_per_model if len(p) > 0]
+            if not all_preds:
+                preds = torch.zeros((0, 6))
+            else:
+                preds = torch.cat(all_preds, 0)
+                
+            # NMS
+            if len(preds) > 0:
+                # Use batched_nms to perform NMS independently for each class
+                # preds[:, 0] is class index
+                keep = torchvision.ops.batched_nms(preds[:, 1:5], preds[:, 5], preds[:, 0], iou_thres)
+                preds = preds[keep]
             
         # Filter by conf
         if len(preds) > 0:
@@ -262,17 +407,23 @@ def evaluate_ensemble(gt_dir, pred_dirs, img_dir=None, names=None, img_w=1280, i
         ap = compute_ap(recall, precision)
         ap_list.append(ap)
         
+        # Find best F1 score and corresponding P/R
+        f1 = 2 * precision * recall / (precision + recall + 1e-16)
+        best_i = np.argmax(f1)
+        
         plot_data.append({
             'class': c,
             'precision': precision,
             'recall': recall,
             'conf': c_conf,
-            'ap': ap
+            'ap': ap,
+            'best_p': precision[best_i],
+            'best_r': recall[best_i]
         })
         
-        # Precision & Recall at the given conf_thres (last point of the curve)
-        p_list.append(precision[-1])
-        r_list.append(recall[-1])
+        # Use Best F1 P/R for reporting (Fair comparison with Ultralytics)
+        p_list.append(precision[best_i])
+        r_list.append(recall[best_i])
         
     mAP = np.mean(ap_list) if ap_list else 0.0
     mean_p = np.mean(p_list) if p_list else 0.0
@@ -482,3 +633,81 @@ def plot_batch_images(images, labels, save_path, names=None, is_pred=False):
         print(f'Failed to plot batch images: {e}')
         import traceback
         traceback.print_exc()
+
+def analyze_incremental_detection(gt_dir, base_pred_dir, ensemble_pred_dir, img_w=1280, img_h=720, iou_thres=0.5):
+    """
+    Analyze how many objects missed by the base model were recovered by the ensemble model.
+    """
+    gt_files = glob.glob(str(gt_dir / "*.txt"))
+    
+    total_gt = 0
+    missed_by_base = 0
+    recovered_by_ensemble = 0
+    
+    for gt_path in gt_files:
+        stem = Path(gt_path).stem
+        
+        # Load GT
+        gt = load_yolo_labels(gt_path, img_w, img_h)
+        if len(gt) == 0:
+            continue
+        
+        total_gt += len(gt)
+        gt_boxes = gt[:, 1:5]
+        
+        # Load Base Preds
+        base_path = base_pred_dir / (stem + ".txt")
+        if not base_path.exists():
+             # Try fake_A
+             base_path = base_pred_dir / (stem + "_fake_A.txt")
+             
+        base_preds = load_yolo_labels(base_path, img_w, img_h)
+        
+        # Identify Missed GT by Base
+        missed_indices = []
+        if len(base_preds) == 0:
+            missed_indices = list(range(len(gt)))
+        else:
+            base_boxes = base_preds[:, 1:5]
+            ious = box_iou(gt_boxes, base_boxes) # [N_gt, N_base]
+            max_ious, _ = ious.max(1)
+            missed_indices = (max_ious < iou_thres).nonzero(as_tuple=True)[0].tolist()
+            
+        missed_by_base += len(missed_indices)
+        
+        if not missed_indices:
+            continue
+            
+        # Load Ensemble Preds
+        ens_path = ensemble_pred_dir / (stem + ".txt")
+        ens_preds = load_yolo_labels(ens_path, img_w, img_h)
+        
+        if len(ens_preds) == 0:
+            continue
+            
+        # Check if Ensemble detected these missed GTs
+        ens_boxes = ens_preds[:, 1:5]
+        missed_gt_boxes = gt_boxes[missed_indices]
+        
+        ious_ens = box_iou(missed_gt_boxes, ens_boxes) # [N_missed, N_ens]
+        max_ious_ens, _ = ious_ens.max(1)
+        
+        recovered_count = (max_ious_ens >= iou_thres).sum().item()
+        recovered_by_ensemble += recovered_count
+        
+    recovery_rate = (recovered_by_ensemble / missed_by_base * 100) if missed_by_base > 0 else 0.0
+    
+    print("\n" + "="*40)
+    print("  🔍 Incremental Detection Analysis")
+    print("="*40)
+    print(f"  - Total GT Objects: {total_gt}")
+    print(f"  - Missed by Base Model: {missed_by_base} ({missed_by_base/total_gt*100:.1f}%)")
+    print(f"  - Recovered by Ensemble: {recovered_by_ensemble} ({recovery_rate:.1f}%)")
+    print("="*40 + "\n")
+    
+    return {
+        'total_gt': total_gt,
+        'missed_by_base': missed_by_base,
+        'recovered_by_ensemble': recovered_by_ensemble,
+        'recovery_rate': recovery_rate
+    }

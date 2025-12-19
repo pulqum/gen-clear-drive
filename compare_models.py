@@ -33,12 +33,12 @@ PROJ = Path(__file__).parent
 
 # ========== 중앙 설정 (여기만 수정하면 됨) ==========
 # Baseline 모델 설정
-BASELINE_CKPT_NAME = "clear_d2n_baseline_scalewidth_e100_k5k"
+BASELINE_CKPT_NAME = "clear_n2d_baseline_scalewidth_e100_k5k"
 BASELINE_EPOCH = "latest"
 BASELINE_NETG = "resnet_9blocks"
 
 # Ours 모델 설정
-OURS_CKPT_NAME = "clear_d2n_yolo_v3_lambda3_scalewidth_e100_k5k"
+OURS_CKPT_NAME = "clear_n2d_yolo_v3_lambda3_scalewidth_e100_k5k"
 OURS_EPOCH = "latest"
 OURS_NETG = "resnet_9blocks"
 
@@ -51,7 +51,7 @@ CROP_SIZE = 256   # scale_width 모드에서 최소 높이로 작동하므로, �
 # ===============================================
 
 
-def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction='night2day', skip_gen=False):
+def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction='night2day', skip_gen=False, only_ensemble=False):
     """
     두 CycleGAN 모델을 비교합니다.
     
@@ -61,7 +61,12 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         yolo_model: YOLO 모델 경로
         direction: 'night2day' or 'day2night'
         skip_gen: True일 경우 샘플링 및 변환 과정을 건너뜀
+        only_ensemble: True일 경우 개별 평가도 건너뛰고 앙상블만 수행
     """
+    if only_ensemble:
+        skip_gen = True
+        print("⏩ Ensemble Only 모드: 데이터 생성 및 개별 모델 평가를 건너뜁니다.")
+
     print("\n" + "="*60)
     print(f"  CycleGAN vs CycleGAN+YOLO 비교 실험 ({direction})")
     print("="*60 + "\n")
@@ -109,16 +114,19 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
             return
         print(f"⏩ 기존 결과 폴더를 재사용합니다: {exp_root}")
         
-        # YOLO 결과 폴더만 초기화 (평가는 다시 해야 하므로)
-        yolo_results_dir = exp_root / "yolo_results"
-        if yolo_results_dir.exists():
-            print(f"🗑️  기존 YOLO 결과 폴더 삭제 중 ({yolo_results_dir.name})...")
-            shutil.rmtree(yolo_results_dir)
-        yolo_results_dir.mkdir(exist_ok=True)
+        # YOLO 결과 폴더 초기화 (only_ensemble이 아닐 때만 삭제)
+        if not only_ensemble:
+            yolo_results_dir = exp_root / "yolo_results"
+            if yolo_results_dir.exists():
+                print(f"🗑️  기존 YOLO 결과 폴더 삭제 중 ({yolo_results_dir.name})...")
+                shutil.rmtree(yolo_results_dir)
+            yolo_results_dir.mkdir(exist_ok=True)
+        else:
+            print(f"⏩ Ensemble Only: 기존 YOLO 결과 폴더 유지 ({exp_root / 'yolo_results'})")
     
     # 경로 정의
     src_input = exp_root / "inputs" / src_name
-    tgt_input = exp_root / "inputs" / tgt_name
+    # tgt_input = exp_root / "inputs" / tgt_name  # Unused
     baseline_out = exp_root / "outputs" / "baseline"
     yolo_out = exp_root / "outputs" / "yolo"
     baseline_img_dir = baseline_out / BASELINE_CKPT_NAME / "test_latest" / "images"
@@ -136,13 +144,13 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
             copy_labels=True
         )
         
-        # 1-2. Target Sampling (Reference - for structure only, not evaluated)
-        sample_subset(
-            src_root=tgt_path,
-            dest_root=tgt_input,
-            n_samples=n_samples,
-            copy_labels=True
-        )
+        # 1-2. Target Sampling (Reference) - Removed as it's unused for evaluation
+        # sample_subset(
+        #     src_root=tgt_path,
+        #     dest_root=tgt_input,
+        #     n_samples=n_samples,
+        #     copy_labels=True
+        # )
         print(f"✓ {n_samples}개 샘플 준비 완료\n")
     else:
         print(f"⏩ Step 1: 데이터 샘플링 건너뜀 (기존 데이터 사용)")
@@ -215,54 +223,75 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
     print("✓ 평가 준비 완료")
     
     # ========== 5. YOLO 평가 실행 ==========
-    print("\n🎯 Step 5: YOLO 평가 실행...")
-    
-    # 5-1. Original Source
-    print(f"\n  [1/3] Original {src_name.capitalize()} (Source) 평가...")
-    metrics_src = run_yolo_val_api(
-        model_path=Path(yolo_model),
-        data_yaml=src_input / "data.yaml",
-        split="test",
-        imgsz=1280,
-        device=device,
-        save_dir=exp_root / "yolo_results" / "source",
-        save_txt=True,
-        save_conf=True,
-        batch=16  # OOM 방지를 위해 16으로 하향 조정
-    )
-    
-    # 5-2. Baseline (Fake Target)
-    print(f"\n  [2/3] Baseline ({fake_tgt_label}) 평가...")
-    metrics_baseline = run_yolo_val_api(
-        model_path=Path(yolo_model),
-        data_yaml=baseline_yolo / "data.yaml",
-        split="test",
-        imgsz=1280,
-        device=device,
-        save_dir=exp_root / "yolo_results" / "baseline",
-        save_txt=True,
-        save_conf=True,
-        batch=16  # OOM 방지를 위해 16으로 하향 조정
-    )
-    
-    # 5-3. Ours (Fake Target)
-    print(f"\n  [3/3] Ours ({fake_tgt_label}) 평가...")
-    metrics_yolo = run_yolo_val_api(
-        model_path=Path(yolo_model),
-        data_yaml=yolo_yolo / "data.yaml",
-        split="test",
-        imgsz=1280,
-        device=device,
-        save_dir=exp_root / "yolo_results" / "yolo",
-        save_txt=True,
-        save_conf=True,
-        batch=16  # OOM 방지를 위해 16으로 하향 조정
-    )
+    if not only_ensemble:
+        print("\n🎯 Step 5: YOLO 평가 실행...")
+        
+        # 5-1. Original Source
+        print(f"\n  [1/3] Original {src_name.capitalize()} (Source) 평가...")
+        metrics_src = run_yolo_val_api(
+            model_path=Path(yolo_model),
+            data_yaml=src_input / "data.yaml",
+            split="test",
+            imgsz=1280,
+            device=device,
+            save_dir=exp_root / "yolo_results" / "source",
+            save_txt=True,
+            save_conf=True,
+            batch=16  # OOM 방지를 위해 16으로 하향 조정
+        )
+        
+        # 5-2. Baseline (Fake Target)
+        print(f"\n  [2/3] Baseline ({fake_tgt_label}) 평가...")
+        metrics_baseline = run_yolo_val_api(
+            model_path=Path(yolo_model),
+            data_yaml=baseline_yolo / "data.yaml",
+            split="test",
+            imgsz=1280,
+            device=device,
+            save_dir=exp_root / "yolo_results" / "baseline",
+            save_txt=True,
+            save_conf=True,
+            batch=16  # OOM 방지를 위해 16으로 하향 조정
+        )
+        
+        # 5-3. Ours (Fake Target)
+        print(f"\n  [3/3] Ours ({fake_tgt_label}) 평가...")
+        metrics_yolo = run_yolo_val_api(
+            model_path=Path(yolo_model),
+            data_yaml=yolo_yolo / "data.yaml",
+            split="test",
+            imgsz=1280,
+            device=device,
+            save_dir=exp_root / "yolo_results" / "yolo",
+            save_txt=True,
+            save_conf=True,
+            batch=16  # OOM 방지를 위해 16으로 하향 조정
+        )
+    else:
+        print("\n⏩ Step 5: 개별 모델 평가 건너뜀 (기존 결과 로드)...")
+        # Load previous summary if exists
+        json_path = exp_root / f"comparison_summary_{direction}.json"
+        if json_path.exists():
+            with open(json_path, 'r', encoding='utf-8') as f:
+                prev_summary = json.load(f)
+            metrics_src = prev_summary.get('source', {})
+            metrics_baseline = prev_summary.get('baseline', {})
+            metrics_yolo = prev_summary.get('yolo', {})
+        else:
+            print("⚠️  기존 요약 파일이 없습니다. 0으로 초기화합니다.")
+            metrics_src = {'mAP50': 0, 'precision': 0, 'recall': 0}
+            metrics_baseline = {'mAP50': 0, 'precision': 0, 'recall': 0}
+            metrics_yolo = {'mAP50': 0, 'precision': 0, 'recall': 0}
+
+        # Set save_dirs manually for ensemble step
+        metrics_src['save_dir'] = exp_root / "yolo_results" / "source"
+        metrics_baseline['save_dir'] = exp_root / "yolo_results" / "baseline"
+        metrics_yolo['save_dir'] = exp_root / "yolo_results" / "yolo"
     
     # ========== 6. Ensemble 평가 ==========
     print(f"\n🎯 Step 6: Ensemble 평가 실행 ({src_name.capitalize()} + {fake_tgt_label})...")
     try:
-        from ensemble_eval import evaluate_ensemble
+        from ensemble_eval import evaluate_ensemble, analyze_incremental_detection
         
         gt_dir = src_input / "labels"
         
@@ -278,40 +307,88 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         NAMES = ["person", "rider", "car", "bus", "truck", "bike", "motor", "traffic light", "traffic sign", "train"]
 
         # 1. Ensemble (Source + Ours)
+        metrics_ensemble_nms = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        metrics_ensemble_wbf = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        
         if src_pred_dir.exists() and ours_pred_dir.exists():
-            print(f"\n  [Ensemble 1] {src_name.capitalize()} + Ours 평가 중...")
-            metrics_ensemble = evaluate_ensemble(
+            print(f"\n  [Ensemble 1 - NMS] {src_name.capitalize()} + Ours 평가 중...")
+            metrics_ensemble_nms = evaluate_ensemble(
                 gt_dir=gt_dir,
                 pred_dirs=[src_pred_dir, ours_pred_dir],
                 img_dir=src_input / "images",
                 names=NAMES,
                 img_w=1280, img_h=720,
                 iou_thres=0.5, conf_thres=0.001,
-                save_dir=exp_root / "yolo_results" / "ensemble"
+                save_dir=exp_root / "yolo_results" / "ensemble_nms",
+                method='nms'
             )
-        else:
-            metrics_ensemble = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+            
+            print(f"\n  [Ensemble 1 - WBF] {src_name.capitalize()} + Ours 평가 중...")
+            metrics_ensemble_wbf = evaluate_ensemble(
+                gt_dir=gt_dir,
+                pred_dirs=[src_pred_dir, ours_pred_dir],
+                img_dir=src_input / "images",
+                names=NAMES,
+                img_w=1280, img_h=720,
+                iou_thres=0.55, conf_thres=0.001,
+                save_dir=exp_root / "yolo_results" / "ensemble_wbf",
+                method='wbf'
+            )
+            
+            # Analyze Incremental Detection (Ours)
+            print(f"\n  [Analysis] {src_name.capitalize()} 모델이 놓친 객체를 Ours 앙상블이 얼마나 찾았는가?")
+            analyze_incremental_detection(
+                gt_dir=gt_dir,
+                base_pred_dir=src_pred_dir,
+                ensemble_pred_dir=exp_root / "yolo_results" / "ensemble_wbf" / "labels",
+                img_w=1280, img_h=720
+            )
 
         # 2. Ensemble (Source + Baseline)
+        metrics_ensemble2_nms = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        metrics_ensemble2_wbf = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        
         if src_pred_dir.exists() and baseline_pred_dir.exists():
-            print(f"\n  [Ensemble 2] {src_name.capitalize()} + Baseline 평가 중...")
-            metrics_ensemble2 = evaluate_ensemble(
+            print(f"\n  [Ensemble 2 - NMS] {src_name.capitalize()} + Baseline 평가 중...")
+            metrics_ensemble2_nms = evaluate_ensemble(
                 gt_dir=gt_dir,
                 pred_dirs=[src_pred_dir, baseline_pred_dir],
                 img_dir=src_input / "images",
                 names=NAMES,
                 img_w=1280, img_h=720,
                 iou_thres=0.5, conf_thres=0.001,
-                save_dir=exp_root / "yolo_results" / "ensemble_baseline"
+                save_dir=exp_root / "yolo_results" / "ensemble_baseline_nms",
+                method='nms'
             )
-        else:
-            metrics_ensemble2 = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+
+            print(f"\n  [Ensemble 2 - WBF] {src_name.capitalize()} + Baseline 평가 중...")
+            metrics_ensemble2_wbf = evaluate_ensemble(
+                gt_dir=gt_dir,
+                pred_dirs=[src_pred_dir, baseline_pred_dir],
+                img_dir=src_input / "images",
+                names=NAMES,
+                img_w=1280, img_h=720,
+                iou_thres=0.55, conf_thres=0.001,
+                save_dir=exp_root / "yolo_results" / "ensemble_baseline_wbf",
+                method='wbf'
+            )
+            
+            # Analyze Incremental Detection (Baseline)
+            print(f"\n  [Analysis] {src_name.capitalize()} 모델이 놓친 객체를 Baseline 앙상블이 얼마나 찾았는가?")
+            analyze_incremental_detection(
+                gt_dir=gt_dir,
+                base_pred_dir=src_pred_dir,
+                ensemble_pred_dir=exp_root / "yolo_results" / "ensemble_baseline_wbf" / "labels",
+                img_w=1280, img_h=720
+            )
             
     except Exception as e:
         print(f"⚠️  Ensemble evaluation failed: {e}")
         traceback.print_exc()
-        metrics_ensemble = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
-        metrics_ensemble2 = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        metrics_ensemble_nms = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        metrics_ensemble_wbf = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        metrics_ensemble2_nms = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
+        metrics_ensemble2_wbf = {'mAP50': 0.0, 'precision': 0.0, 'recall': 0.0}
 
     print("\n✓ 평가 완료\n")
     
@@ -329,32 +406,40 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
             f'Original ({src_name.capitalize()}) [Source]',
             f'Baseline ({fake_tgt_label})',
             f'Ours ({fake_tgt_label})',
-            f'Ensemble ({src_name.capitalize()}+Ours)',
-            f'Ensemble ({src_name.capitalize()}+Baseline)',
+            f'Ensemble NMS ({src_name.capitalize()}+Baseline)',
+            f'Ensemble WBF ({src_name.capitalize()}+Baseline)',
+            f'Ensemble NMS ({src_name.capitalize()}+Ours)',
+            f'Ensemble WBF ({src_name.capitalize()}+Ours)',
             'Improvement (Ours vs Baseline)'
         ],
         'mAP50': [
             f"{metrics_src['mAP50']:.4f}",
             f"{metrics_baseline['mAP50']:.4f}",
             f"{metrics_yolo['mAP50']:.4f}",
-            f"{metrics_ensemble['mAP50']:.4f}",
-            f"{metrics_ensemble2['mAP50']:.4f}",
+            f"{metrics_ensemble2_nms['mAP50']:.4f}",
+            f"{metrics_ensemble2_wbf['mAP50']:.4f}",
+            f"{metrics_ensemble_nms['mAP50']:.4f}",
+            f"{metrics_ensemble_wbf['mAP50']:.4f}",
             safe_improvement(metrics_yolo['mAP50'], metrics_baseline['mAP50'])
         ],
         'Precision': [
             f"{metrics_src['precision']:.4f}",
             f"{metrics_baseline['precision']:.4f}",
             f"{metrics_yolo['precision']:.4f}",
-            f"{metrics_ensemble['precision']:.4f}",
-            f"{metrics_ensemble2['precision']:.4f}",
+            f"{metrics_ensemble2_nms['precision']:.4f}",
+            f"{metrics_ensemble2_wbf['precision']:.4f}",
+            f"{metrics_ensemble_nms['precision']:.4f}",
+            f"{metrics_ensemble_wbf['precision']:.4f}",
             safe_improvement(metrics_yolo['precision'], metrics_baseline['precision'])
         ],
         'Recall': [
             f"{metrics_src['recall']:.4f}",
             f"{metrics_baseline['recall']:.4f}",
             f"{metrics_yolo['recall']:.4f}",
-            f"{metrics_ensemble['recall']:.4f}",
-            f"{metrics_ensemble2['recall']:.4f}",
+            f"{metrics_ensemble2_nms['recall']:.4f}",
+            f"{metrics_ensemble2_wbf['recall']:.4f}",
+            f"{metrics_ensemble_nms['recall']:.4f}",
+            f"{metrics_ensemble_wbf['recall']:.4f}",
             safe_improvement(metrics_yolo['recall'], metrics_baseline['recall'])
         ]
     }
@@ -374,15 +459,19 @@ def compare_models(n_samples=100, device='0', yolo_model='yolo11s.pt', direction
         elif isinstance(obj, Path): return str(obj)
         return obj
 
-    metrics_ensemble_serializable = {k: float(v) for k, v in metrics_ensemble.items()}
-    metrics_ensemble2_serializable = {k: float(v) for k, v in metrics_ensemble2.items()}
+    metrics_ensemble_nms_serializable = {k: float(v) for k, v in metrics_ensemble_nms.items()}
+    metrics_ensemble_wbf_serializable = {k: float(v) for k, v in metrics_ensemble_wbf.items()}
+    metrics_ensemble2_nms_serializable = {k: float(v) for k, v in metrics_ensemble2_nms.items()}
+    metrics_ensemble2_wbf_serializable = {k: float(v) for k, v in metrics_ensemble2_wbf.items()}
 
     summary = {
         'source': {k: float(v) if v is not None and not isinstance(v, Path) else 0.0 for k, v in metrics_src.items() if k != 'save_dir'},
         'baseline': {k: float(v) if v is not None and not isinstance(v, Path) else 0.0 for k, v in metrics_baseline.items() if k != 'save_dir'},
         'yolo': {k: float(v) if v is not None and not isinstance(v, Path) else 0.0 for k, v in metrics_yolo.items() if k != 'save_dir'},
-        'ensemble': metrics_ensemble_serializable,
-        'ensemble_baseline': metrics_ensemble2_serializable,
+        'ensemble_nms': metrics_ensemble_nms_serializable,
+        'ensemble_wbf': metrics_ensemble_wbf_serializable,
+        'ensemble_baseline_nms': metrics_ensemble2_nms_serializable,
+        'ensemble_baseline_wbf': metrics_ensemble2_wbf_serializable,
         'improvement': {}
     }
     
@@ -417,6 +506,8 @@ if __name__ == "__main__":
                         help='변환 방향 (night2day 또는 day2night)')
     parser.add_argument('--skip_gen', action='store_true',
                         help='데이터 샘플링 및 CycleGAN 변환 과정을 건너뛰고 기존 결과로 평가만 수행')
+    parser.add_argument('--only_ensemble', action='store_true',
+                        help='개별 모델 평가도 건너뛰고 앙상블 평가만 수행 (skip_gen 자동 적용)')
     
     args = parser.parse_args()
     
@@ -425,5 +516,6 @@ if __name__ == "__main__":
         device=args.device,
         yolo_model=args.yolo_model,
         direction=args.direction,
-        skip_gen=args.skip_gen
+        skip_gen=args.skip_gen,
+        only_ensemble=args.only_ensemble
     )
